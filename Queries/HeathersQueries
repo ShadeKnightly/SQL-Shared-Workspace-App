@@ -1,0 +1,90 @@
+-- Compares each workspace’s price per person to 
+-- the average price per person for similar workspaces
+
+-- Importance to user stories:
+-- Helps Owners attract Coworkers
+-- and keep listings current and competitive 
+-- by using relevant market data to making business decisions
+
+CREATE VIEW WorkspacePricingComparisonView AS
+WITH WorkspacePricing AS (
+    SELECT 
+        u.UserId AS OwnerId,
+        p.PropertyName,
+        w.WorkspaceId,
+        wt.TypeName AS WorkspaceType,
+        CAST(w.Price AS DECIMAL(10,2)) AS Price,
+        c.CityName,
+        p.Neighborhood,
+        w.MaxCapacity,
+
+        -- Price per person
+        CAST(w.Price / NULLIF(w.MaxCapacity, 0) AS DECIMAL(10,2)) AS PricePerPerson,
+
+        -- Average price per person for same type and city
+        (
+            SELECT CAST(AVG(CAST(w2.Price / NULLIF(w2.MaxCapacity, 0) AS DECIMAL(10,2))) AS DECIMAL(10,2))
+            FROM Workspace w2
+            JOIN Property p2 ON w2.PropertyId = p2.PropertyId
+            WHERE w2.WorkspaceTypeId = w.WorkspaceTypeId
+              AND p2.CityId = p.CityId
+              AND w2.AvailableDate <= GETDATE()
+        ) AS AvgCityPricePerPerson,
+
+        -- Price difference per person
+        CAST(
+            CAST(w.Price / NULLIF(w.MaxCapacity, 0) AS DECIMAL(10,2)) - 
+            (
+                SELECT CAST(AVG(CAST(w2.Price / NULLIF(w2.MaxCapacity, 0) AS DECIMAL(10,2))) AS DECIMAL(10,2))
+                FROM Workspace w2
+                JOIN Property p2 ON w2.PropertyId = p2.PropertyId
+                WHERE w2.WorkspaceTypeId = w.WorkspaceTypeId
+                  AND p2.CityId = p.CityId
+                  AND w2.AvailableDate <= GETDATE()
+            )
+        AS DECIMAL(10,2)) AS PriceDifferencePerPerson,
+
+        -- Status based on 10% margin
+        CASE
+            WHEN (w.Price / NULLIF(w.MaxCapacity, 0)) > 
+                 (
+                    SELECT AVG(w2.Price / NULLIF(w2.MaxCapacity, 0)) * 1.10
+                    FROM Workspace w2
+                    JOIN Property p2 ON w2.PropertyId = p2.PropertyId
+                    WHERE w2.WorkspaceTypeId = w.WorkspaceTypeId
+                      AND p2.CityId = p.CityId
+                      AND w2.AvailableDate <= GETDATE()
+                 )
+                THEN 'Overpriced'
+
+            WHEN (w.Price / NULLIF(w.MaxCapacity, 0)) < 
+                 (
+                    SELECT AVG(w2.Price / NULLIF(w2.MaxCapacity, 0)) * 0.90
+                    FROM Workspace w2
+                    JOIN Property p2 ON w2.PropertyId = p2.PropertyId
+                    WHERE w2.WorkspaceTypeId = w.WorkspaceTypeId
+                      AND p2.CityId = p.CityId
+                      AND w2.AvailableDate <= GETDATE()
+                 )
+                THEN 'Underpriced'
+
+            ELSE 'Fairly Priced'
+        END AS PricingStatus
+
+    FROM Workspace w
+    JOIN Property p ON w.PropertyId = p.PropertyId
+    JOIN City c ON p.CityId = c.CityId
+    JOIN WorkspaceType wt ON w.WorkspaceTypeId = wt.WorkspaceTypeId
+    JOIN dbo.[User] u ON w.UserId = u.UserId
+    WHERE w.AvailableDate <= GETDATE()
+)
+
+SELECT *
+FROM WorkspacePricing
+WHERE PricingStatus IN ('Overpriced', 'Underpriced')
+ORDER BY 
+    CASE 
+        WHEN PricingStatus = 'Overpriced' THEN 1
+        WHEN PricingStatus = 'Underpriced' THEN 2
+    END, 
+    PriceDifferencePerPerson DESC;
